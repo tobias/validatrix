@@ -1,0 +1,12 @@
+<subsystem xmlns="urn:jboss:domain:messaging-activemq:1.0">
+    <!--<foo/>-->
+    <server name="foo">
+      <bindings-directory/>
+      <bindings-directory/>
+      <jms-queue name="x" entries=""/>
+
+    </server>
+    <bar/>
+
+    <bindings-directory/>
+</subsystem>
