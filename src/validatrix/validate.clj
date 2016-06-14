@@ -1,6 +1,7 @@
 (ns validatrix.validate
   (:require [clojure.string :as str]
             [validatrix.parsing :as p]
+            [validatrix.schema :as s]
             [clojure.zip :as z]
             spyscope.core
             [clojure.java.io :as io])
@@ -43,7 +44,7 @@
       (ignorableWhitespace [_ _ _]
         (store-loc (location))))))
 
-(defn doc-location-zip [file]
+(defn doc-location-tree [file]
   (let [reader (-> (SAXParserFactory/newInstance) .newSAXParser .getXMLReader)
         tree (atom (z/vector-zip []))]
     (.setContentHandler reader (content-handler tree))
@@ -54,19 +55,19 @@
 (def schema-factory (delay (SchemaFactory/newInstance XMLConstants/W3C_XML_SCHEMA_NS_URI)))
 
 (defn err-handler [data]
-  (let [store (fn [k e]
+  (let [store (fn [e]
                 (let [msg (.getMessage e)
                       [err-type _] (p/split-err msg)
                       ignore? (p/ignored-errors err-type)]
                   (when-not (and ignore? (re-find ignore? msg))
-                    (swap! data #(update % k (fnil conj []) e)))))]
+                    (swap! data conj e))))]
     (reify ErrorHandler
-      (error [_ e] (store :error e))
-      (fatalError [_ e] (store :fatal e))
-      (warning [_ e] (store :warning e)))))
+      (error [_ e] (store e))
+      (fatalError [_ e] (store e))
+      (warning [_ e] (store e)))))
 
-(defn validate [^File file schemas]
-  (let [errors (atom {})]
+(defn find-errors [^File file schemas]
+  (let [errors (atom [])]
     (doseq [^Schema schema schemas]
       (.validate (doto (.newValidator schema)
                    (.setErrorHandler (err-handler errors)))
@@ -126,35 +127,35 @@
     (rewind #"a" data 2 1))
   )
 
-(defn translate-error [err f-lines]
+(defn translate-error [context err]
   (let [line-num (dec (.getLineNumber err))
         col-num (dec (.getColumnNumber err))
         base-msg (.getMessage err)
         [key _] (p/split-err base-msg)]
     (let [translator (or (p/translators key) p/default-translator)
-          translated (translator base-msg)]
+          translated (translator context base-msg)]
       (merge {:line line-num
               :col col-num
               :msg base-msg}
              translated
-             (rewind (:rewind-to translated) f-lines line-num col-num)))))
+             (rewind (:rewind-to translated) (:lines context) line-num col-num)))))
 
 (defn left-pad [s padding]
   (format (str "%" (+ padding (count s)) "s") s))
 
-(defn format-error [err f-lines]
-  (let [{:keys [line col msg original-msg extra-msg]} (translate-error err f-lines)
+(defn format-error [context err]
+  (let [{:keys [line col msg original-msg extra-msg]} (translate-error context err)
         line-index-width (count (str (+ line (* 2 context-lines))))
         padding (+ col line-index-width 2)]
     (str (header "Validation Error")
          "\n\n"
-         (prefix-lines f-lines line line-index-width)
+         (prefix-lines (:lines context) line line-index-width)
          "\n\n"
          (left-pad (str "^ " msg) padding)
-         (when extra-msg (str "\n" (left-pad (str "  " extra-msg) padding)))
          "\n\n"
-         (postfix-lines f-lines (inc line) line-index-width)
+         (postfix-lines (:lines context) (inc line) line-index-width)
          "\n\n"
+         (when extra-msg (format "%s\n\n" extra-msg))
          "Original message:\n"
          original-msg
          "\n\n"
@@ -162,16 +163,32 @@
 
 (def display-error (comp println format-error))
 
+(defn validate
+  "Validates `source` against `schema`, printing the found errors with (:print-fn opts).
+
+  `source` and `schema` can be anything that can be passed to `clojure.java.io/file`"
+  [source schema {:keys [print-fn ignore-var-values?]
+                  :or   {print-fn println}}]
+  (let [source-file (io/file source)
+        errors (find-errors source-file [(.newSchema @schema-factory schema)])
+        context {:lines (lines source-file)
+                 :locations (doc-location-tree source-file)
+                 :schema (s/schema-tree schema)}]
+    (run! #(print-fn (format-error context %)) errors)))
 
 
 (comment
-  (def errors (validate (io/file (io/resource "subsystem.xml"))
-                        [(.newSchema @schema-factory (io/resource "wildfly-messaging-activemq_1_0.xsd"))]))
+  (def errors (find-errors (io/file (io/resource "subsystem.xml"))
+                           [(.newSchema @schema-factory (io/resource "wildfly-messaging-activemq_1_0.xsd"))]))
   (def f-lines (lines (io/resource "subsystem.xml")))
-  (def locations (doc-location-zip (io/file (io/resource "subsystem.xml"))))
-  (display-error (first (:error errors)) f-lines)
-  (run! #(display-error % f-lines) (:error errors))
+  (def locations (doc-location-tree (io/file (io/resource "subsystem.xml"))))
+  (def context {:locations locations
+                :lines     f-lines
+                :schema    (s/schema-tree (io/resource "wildfly-messaging-activemq_1_0.xsd"))})
+  (display-error context (first (:error errors)))
+  (run! #(display-error context %) (:error errors))
 
+  (validate (io/resource "subsystem.xml") (io/resource "wildfly-messaging-activemq_1_0.xsd") {})
 
 
 

@@ -4,6 +4,8 @@
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :dependencies [[org.clojure/clojure "1.8.0"]
-                 [org.apache.ws.xmlschema/xmlschema-walker "2.2.1"]]
+                 [org.apache.ws.xmlschema/xmlschema-walker "2.2.1"]
+                 [clemence "0.2.0"]]
+  :main validatrix.main
   :profiles {:dev {:dependencies [[spyscope "0.1.5"]]}})
 

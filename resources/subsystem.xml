@@ -1,8 +1,8 @@
 <subsystem xmlns="urn:jboss:domain:messaging-activemq:1.0">
     <!--<foo/>-->
-    <server name="foo">
+    <server nae="foo" entries="asdf">
       <bindings-directory/>
-      <bindings-directory/>
+      <jornal-directory/>
       <jms-queue name="x" entries=""/>
 
     </server>

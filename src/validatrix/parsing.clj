@@ -1,5 +1,6 @@
 (ns validatrix.parsing
   (:require [clojure.string :as str]
+            [validatrix.util :as u]
             spyscope.core))
 
 (def attribute-match "(?<=(^|\\s+)){:attribute}\\s*=")
@@ -43,8 +44,9 @@
 
 (defn ->simple-translator [spec]
   (let [[re & mappings] (:parse spec)]
-    (fn [msg]
+    (fn [context msg]
       (-> (extract-message msg re mappings)
+          (assoc :_context context)
           (merge (select-keys spec [:msg :rewind-to]))
           (apply-templates [:msg])
           (apply-templates [:rewind-to] escape-regex-chars)
@@ -63,7 +65,7 @@
     (rest res)
     [nil msg]))
 
-(defn default-translator [msg]
+(defn default-translator [_ msg]
   {:msg (-> msg split-err last)
    :original-msg msg})
 
@@ -104,30 +106,46 @@
 (def translators
   {
    ;; cvc-attribute.3: The value ''{2}'' of attribute ''{1}'' on element ''{0}'' is not valid with respect to its type, ''{3}''.
-   "cvc-attribute.3" (->simple-translator
-                       {:parse [#"value '(.*?)' of attribute '(.*?)' on element '(.*?)'.*type, '(.*?)'"
-                                :value :attribute :element :type]
-                        :msg "This should be a {:type}"
-                        :rewind-to attribute-value-match})
+   "cvc-attribute.3"        (->simple-translator
+                              {:parse     [#"value '(.*?)' of attribute '(.*?)' on element '(.*?)'.*type, '(.*?)'"
+                                           :value :attribute :element :type]
+                               :msg       "This should be a {:type}"
+                               :rewind-to attribute-value-match})
 
    ;; cvc-complex-type.2.4.a: Invalid content was found starting with element ''{0}''. One of ''{1}'' is expected.
-   "cvc-complex-type.2.4.a" (comp #(assoc %
-                                    :extra-msg (format "Valid options are: %s"
-                                                       (str/join ", " (:options %))))
-                                  #(update % :options (fn [x] (map single-quote x)))
-                                  parse-options
-                                  (->simple-translator
-                                    {:parse     [#"element '(.*?)'\. One of '\{(.*?)\}'"
-                                                 :element :options]
-                                     :msg       "Element '{:element}' doesn't belong here"
-                                     :rewind-to element-match}))
+   "cvc-complex-type.2.4.a" (comp
+                              (fn [res]
+                                (assoc res
+                                  :extra-msg
+                                  (if-let [alt (u/alternate-spelling (:element res) (:options res))]
+                                    (format "Did you mean '%s'?" alt)
+                                    (format "Valid options are: %s"
+                                            (str/join ", " (map single-quote (:options res)))))))
+                              parse-options
+                              (->simple-translator
+                                {:parse     [#"element '(.*?)'\. One of '\{(.*?)\}'"
+                                             :element :options]
+                                 :msg       "Element '{:element}' doesn't belong here"
+                                 :rewind-to element-match}))
 
    ;; cvc-complex-type.3.2.2: Attribute ''{1}'' is not allowed to appear in element ''{0}''.
-   "cvc-complex-type.3.2.2" (->simple-translator
-                              {:parse     [#" Attribute '(.*?)' .* element '(.*?)'"
-                                           :attribute :element]
-                               :msg       "'{:attribute}' isn't an allowed attribute for the '{:element}' element"
-                               :rewind-to attribute-match})
+   "cvc-complex-type.3.2.2" (comp
+                              (fn [res]
+                                (if-let [els (u/search-tree #(some #{(:attribute res)} (:attributes %)) (-> res :_context :schema))]
+                                  (assoc res :extra-msg (format "'%s' is allowed on elements: %s\nDid you intend to put it on one of them?"
+                                                                (:attribute res)
+                                                                (str/join ", " (map (comp single-quote :name first) els))))
+                                  (if-let [alt (u/alternate-spelling (:attribute res)
+                                                                     (-> (u/search-tree #(= (:element res) (:name %)) (-> res :_context :schema))
+                                                                         ffirst
+                                                                         :attributes))]
+                                    (assoc res :extra-msg (format "Did you mean '%s'?" alt))
+                                    res)))
+                              (->simple-translator
+                                {:parse     [#" Attribute '(.*?)' .* element '(.*?)'"
+                                             :attribute :element]
+                                 :msg       "'{:attribute}' isn't an allowed attribute for the '{:element}' element"
+                                 :rewind-to attribute-match}))
 
    ;; cvc-enumeration-valid: Value ''{0}'' is not facet-valid with respect to enumeration ''{1}''. It must be a value from the enumeration.
    "cvc-enumeration-valid"  (->simple-translator
@@ -137,11 +155,11 @@
                                :rewind-to value-match})
 
    ;; cvc-complex-type.4: Attribute ''{1}'' must appear on element ''{0}''.
-   "cvc-complex-type.4" (->simple-translator
-                          {:parse [#"Attribute '(.*?)'.*element '(.*?)'"
-                                   :attribute :element]
-                           :msg "You need a '{:attribute}' attribute here"
-                           :rewind-to element-name-end-match})
+   "cvc-complex-type.4"     (->simple-translator
+                              {:parse     [#"Attribute '(.*?)'.*element '(.*?)'"
+                                           :attribute :element]
+                               :msg       "You need a '{:attribute}' attribute here"
+                               :rewind-to element-name-end-match})
    })
 
 (comment

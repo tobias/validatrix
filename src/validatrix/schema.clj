@@ -37,7 +37,12 @@
       (.walk (XmlSchemaWalker. (.getParent schema) (visitor tree)) root))
     (z/root @tree)))
 
+(def schema-tree (comp schema-zip read-schema))
+
 (comment
   (def schema (read-schema (io/resource "wildfly-messaging-activemq_1_0.xsd")))
   (def walked-schema (schema-zip schema))
+  (require '[validatrix.util :as u])
+  (u/search-zipper #(some #{:quality-of-service} (:attributes %)) walked-schema)
+
   )
