@@ -3,8 +3,8 @@
             [validatrix.parsing :as p]
             [validatrix.schema :as s]
             [clojure.zip :as z]
-            spyscope.core
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [clansi.core :as clansi])
   (:import [javax.xml.validation
             SchemaFactory Schema]
            (javax.xml XMLConstants)
@@ -149,13 +149,13 @@
         padding (+ col line-index-width 2)]
     (str (header "Validation Error")
          "\n\n"
-         (prefix-lines (:lines context) line line-index-width)
+         (clansi/style (prefix-lines (:lines context) line line-index-width) :white)
          "\n\n"
-         (left-pad (str "^ " msg) padding)
+         (clansi/style (left-pad (str "^ " msg) padding) :green :bright)
          "\n\n"
-         (postfix-lines (:lines context) (inc line) line-index-width)
+         (clansi/style (postfix-lines (:lines context) (inc line) line-index-width) :white)
          "\n\n"
-         (when extra-msg (format "%s\n\n" extra-msg))
+         (clansi/style (when extra-msg (format "%s\n\n" extra-msg)) :blue :bright)
          "Original message:\n"
          original-msg
          "\n\n"
