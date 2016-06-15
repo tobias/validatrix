@@ -1,4 +1,4 @@
-(ns validatrix.parsing
+(ns validatrix.translate
   (:require [clojure.string :as str]
             [validatrix.util :as u]
             spyscope.core))
@@ -42,15 +42,14 @@
          (replace esc-map)
          (apply str))))
 
-(defn ->simple-translator [spec]
+(defn basic-translate [context msg spec]
   (let [[re & mappings] (:parse spec)]
-    (fn [context msg]
-      (-> (extract-message msg re mappings)
-          (assoc :_context context)
-          (merge (select-keys spec [:msg :rewind-to]))
-          (apply-templates [:msg])
-          (apply-templates [:rewind-to] escape-regex-chars)
-          (update :rewind-to re-pattern)))))
+    (-> (extract-message msg re mappings)
+        (assoc :_context context)
+        (merge (select-keys spec [:msg :rewind-to]))
+        (apply-templates [:msg])
+        (apply-templates [:rewind-to] escape-regex-chars)
+        (update :rewind-to re-pattern))))
 
 (defn parse-options [m]
   (update m :options
@@ -65,19 +64,89 @@
     (rest res)
     [nil msg]))
 
-(defn default-translator [_ msg]
+(defmulti translate (fn [_ msg] (-> msg split-err first)))
+
+(defmethod translate :default
+  [_ msg]
   {:msg (-> msg split-err last)
    :original-msg msg})
 
+;; cvc-attribute.3: The value ''{2}'' of attribute ''{1}'' on element ''{0}'' is not valid with respect to its type, ''{3}''.
+(defmethod translate "cvc-attribute.3"
+  [context msg]
+  (basic-translate
+    context msg
+    {:parse     [#"value '(.*?)' of attribute '(.*?)' on element '(.*?)'.*type, '(.*?)'"
+                 :value :attribute :element :type]
+     :msg       "This should be a {:type}"
+     :rewind-to attribute-value-match}))
 
+;; cvc-complex-type.2.4.a: Invalid content was found starting with element ''{0}''. One of ''{1}'' is expected.
+(defmethod translate "cvc-complex-type.2.4.a"
+  [context msg]
+  (-> (basic-translate
+        context msg
+        {:parse     [#"element '(.*?)'\. One of '\{(.*?)\}'"
+                     :element :options]
+         :msg       "Element '{:element}' doesn't belong here"
+         :rewind-to element-match})
+      parse-options
+      (as-> res
+            (assoc res
+              :extra-msg
+              (if-let [alt (u/alternate-spelling (:element res) (:options res))]
+                (format "Did you mean '%s'?" alt)
+                (format "Valid options are: %s"
+                        (str/join ", " (map single-quote (:options res)))))))))
 
-(def ignored-errors
-  {
-    ;; will also trigger a cvc-attribute.3, which is more useful
-   "cvc-datatype-valid.1.2.1" #".*"
-   ;; synthesized types should trigger other errors as well
-   "cvc-attribute.3"          #"'#AnonType"
-    })
+;; cvc-complex-type.3.2.2: Attribute ''{1}'' is not allowed to appear in element ''{0}''.
+(defmethod translate "cvc-complex-type.3.2.2"
+  [context msg]
+  (-> (basic-translate
+        context msg
+        {:parse     [#" Attribute '(.*?)' .* element '(.*?)'"
+                     :attribute :element]
+         :msg       "'{:attribute}' isn't an allowed attribute for the '{:element}' element"
+         :rewind-to attribute-match})
+      (as-> res
+            (if-let [els (u/search-tree #(some #{(:attribute res)} (:attributes %)) (-> res :_context :schema))]
+              (assoc res :extra-msg (format "'%s' is allowed on elements: %s\nDid you intend to put it on one of them?"
+                                            (:attribute res)
+                                            (str/join ", " (map (comp single-quote :name first) els))))
+              (if-let [alt (u/alternate-spelling (:attribute res)
+                                                 (-> (u/search-tree #(= (:element res) (:name %)) (-> res :_context :schema))
+                                                     ffirst
+                                                     :attributes))]
+                (assoc res :extra-msg (format "Did you mean '%s'?" alt))
+                res)))))
+
+;; cvc-enumeration-valid: Value ''{0}'' is not facet-valid with respect to enumeration ''{1}''. It must be a value from the enumeration.
+(defmethod translate "cvc-enumeration-valid"
+  [context msg]
+  (basic-translate
+    context msg
+    {:parse     [#"Value '(.*?)'.*enumeration '\[(.*?)\]'"
+                 :value :options]
+     :msg       "Best guess, but this should probably be one of: {:options}"
+     :rewind-to value-match}))
+
+;; cvc-complex-type.4: Attribute ''{1}'' must appear on element ''{0}''.
+(defmethod translate "cvc-complex-type.4"
+  [context msg]
+  (basic-translate
+    context msg
+    {:parse     [#"Attribute '(.*?)'.*element '(.*?)'"
+                 :attribute :element]
+     :msg       "You need a '{:attribute}' attribute here"
+     :rewind-to element-name-end-match}))
+
+(defmulti ignore-error? (comp first split-err))
+
+(defmethod ignore-error? :default                   [_] false)
+;; will also trigger a cvc-attribute.3, which is more useful
+(defmethod ignore-error? "cvc-datatype-valid.1.2.1" [_] true)
+;; synthesized types should trigger other errors as well
+(defmethod ignore-error? "cvc-attribute.3"          [msg] (re-find #"'#AnonType" msg))
 
 (comment
 
@@ -101,68 +170,8 @@
   ;; cvc-complex-type.3.1: Value ''{2}'' of attribute ''{1}'' of element ''{0}'' is not valid with respect to the corresponding attribute use. Attribute ''{1}'' has a fixed value of ''{3}''.
   "cvc-complex-type.3.1"
   ;; cvc-complex-type.3.2.1: Element ''{0}'' does not have an attribute wildcard for attribute ''{1}''.
-  "cvc-complex-type.3.2.1")
+  "cvc-complex-type.3.2.1"
 
-(def translators
-  {
-   ;; cvc-attribute.3: The value ''{2}'' of attribute ''{1}'' on element ''{0}'' is not valid with respect to its type, ''{3}''.
-   "cvc-attribute.3"        (->simple-translator
-                              {:parse     [#"value '(.*?)' of attribute '(.*?)' on element '(.*?)'.*type, '(.*?)'"
-                                           :value :attribute :element :type]
-                               :msg       "This should be a {:type}"
-                               :rewind-to attribute-value-match})
-
-   ;; cvc-complex-type.2.4.a: Invalid content was found starting with element ''{0}''. One of ''{1}'' is expected.
-   "cvc-complex-type.2.4.a" (comp
-                              (fn [res]
-                                (assoc res
-                                  :extra-msg
-                                  (if-let [alt (u/alternate-spelling (:element res) (:options res))]
-                                    (format "Did you mean '%s'?" alt)
-                                    (format "Valid options are: %s"
-                                            (str/join ", " (map single-quote (:options res)))))))
-                              parse-options
-                              (->simple-translator
-                                {:parse     [#"element '(.*?)'\. One of '\{(.*?)\}'"
-                                             :element :options]
-                                 :msg       "Element '{:element}' doesn't belong here"
-                                 :rewind-to element-match}))
-
-   ;; cvc-complex-type.3.2.2: Attribute ''{1}'' is not allowed to appear in element ''{0}''.
-   "cvc-complex-type.3.2.2" (comp
-                              (fn [res]
-                                (if-let [els (u/search-tree #(some #{(:attribute res)} (:attributes %)) (-> res :_context :schema))]
-                                  (assoc res :extra-msg (format "'%s' is allowed on elements: %s\nDid you intend to put it on one of them?"
-                                                                (:attribute res)
-                                                                (str/join ", " (map (comp single-quote :name first) els))))
-                                  (if-let [alt (u/alternate-spelling (:attribute res)
-                                                                     (-> (u/search-tree #(= (:element res) (:name %)) (-> res :_context :schema))
-                                                                         ffirst
-                                                                         :attributes))]
-                                    (assoc res :extra-msg (format "Did you mean '%s'?" alt))
-                                    res)))
-                              (->simple-translator
-                                {:parse     [#" Attribute '(.*?)' .* element '(.*?)'"
-                                             :attribute :element]
-                                 :msg       "'{:attribute}' isn't an allowed attribute for the '{:element}' element"
-                                 :rewind-to attribute-match}))
-
-   ;; cvc-enumeration-valid: Value ''{0}'' is not facet-valid with respect to enumeration ''{1}''. It must be a value from the enumeration.
-   "cvc-enumeration-valid"  (->simple-translator
-                              {:parse     [#"Value '(.*?)'.*enumeration '\[(.*?)\]'"
-                                           :value :options]
-                               :msg       "Best guess, but this should probably be one of: {:options}"
-                               :rewind-to value-match})
-
-   ;; cvc-complex-type.4: Attribute ''{1}'' must appear on element ''{0}''.
-   "cvc-complex-type.4"     (->simple-translator
-                              {:parse     [#"Attribute '(.*?)'.*element '(.*?)'"
-                                           :attribute :element]
-                               :msg       "You need a '{:attribute}' attribute here"
-                               :rewind-to element-name-end-match})
-   })
-
-(comment
 
   ;; cvc-complex-type.5.1: In element ''{0}'', attribute ''{1}'' is a Wild ID. But there is already a Wild ID ''{2}''. There can be only one.
   "cvc-complex-type.5.1"
@@ -231,4 +240,5 @@
   "cvc-type.3.1.2"
   ;; cvc-type.3.1.3: The value ''{1}'' of element ''{0}'' is not valid.
   "cvc-type.3.1.3")
+
 

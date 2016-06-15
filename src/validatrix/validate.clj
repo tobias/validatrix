@@ -1,6 +1,6 @@
 (ns validatrix.validate
   (:require [clojure.string :as str]
-            [validatrix.parsing :as p]
+            [validatrix.translate :as t]
             [validatrix.schema :as s]
             [clojure.zip :as z]
             [clojure.java.io :as io]
@@ -56,10 +56,8 @@
 
 (defn err-handler [data]
   (let [store (fn [e]
-                (let [msg (.getMessage e)
-                      [err-type _] (p/split-err msg)
-                      ignore? (p/ignored-errors err-type)]
-                  (when-not (and ignore? (re-find ignore? msg))
+                (let [msg (.getMessage e)]
+                  (when-not (t/ignore-error? msg)
                     (swap! data conj e))))]
     (reify ErrorHandler
       (error [_ e] (store e))
@@ -130,10 +128,8 @@
 (defn translate-error [context err]
   (let [line-num (dec (.getLineNumber err))
         col-num (dec (.getColumnNumber err))
-        base-msg (.getMessage err)
-        [key _] (p/split-err base-msg)]
-    (let [translator (or (p/translators key) p/default-translator)
-          translated (translator context base-msg)]
+        base-msg (.getMessage err)]
+    (let [translated (t/translate context base-msg)]
       (merge {:line line-num
               :col col-num
               :msg base-msg}
